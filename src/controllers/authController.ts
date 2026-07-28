@@ -11,16 +11,18 @@ dotenv.config({ path: path.join(__dirname, '../../chat.env') });
 
 const JWT_SECRET = process.env.JWT_SECRET || 'vortex123';
 
-// E-posta Gönderici Ayarları
+// Bulut sunucuları (Render/AWS) için SSL destekli Gmail SMTP yapılandırması
 const transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true, // SSL kullanımı
     auth: {
         user: process.env.EMAIL_USER || 'vortex.ch4t@gmail.com',
         pass: process.env.EMAIL_PASS || 'wmwxpjzmqomlygyk'
     }
 });
 
-// 1. KAYIT OLMA
+// 1. KAYIT OLMA (Otomatik Doğrulama ile Anında Giriş İmkanı)
 export const register = async (req: Request, res: Response): Promise<void> => {
     try {
         const { username, email, password } = req.body;
@@ -36,33 +38,31 @@ export const register = async (req: Request, res: Response): Promise<void> => {
         const randomTag = Math.floor(1000 + Math.random() * 9000);
         const uniqueTag = `${username}#${randomTag}`;
 
-        const verificationToken = crypto.randomBytes(32).toString('hex');
-
+        // Kullanıcıyı direkt olarak is_verified = 1 (doğrulanmış) olarak kaydediyoruz
+        // Böylece e-posta gecikse veya engellense bile hemen giriş yapabilir!
         await pool.query(
             'INSERT INTO Users (username, email, password_hash, unique_tag, is_verified, verification_token) VALUES (?, ?, ?, ?, ?, ?)',
-            [username, email, hashedPassword, uniqueTag, 0, verificationToken]
+            [username, email, hashedPassword, uniqueTag, 1, null]
         );
 
-        // BASE_URL ortam değişkeninden alınır, canlıya alırken değiştirmek yeterli
-        const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
-        const verificationLink = `${baseUrl}/api/auth/verify/${verificationToken}`;
-        
-        const mailOptions = {
-            from: process.env.EMAIL_USER || 'vortex.ch4t@gmail.com',
-            to: email,
-            subject: 'Vortex Chat - E-Posta Doğrulama',
-            html: `
-                <h2>Vortex'e Hoş Geldin, ${username}!</h2>
-                <p>Hesabını aktifleştirmek ve sohbete başlamak için lütfen aşağıdaki bağlantıya tıkla:</p>
-                <a href="${verificationLink}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Hesabımı Doğrula</a>
-                <br><br>
-                <p>Eğer bu hesabı sen açmadıysan, bu e-postayı görmezden gelebilirsin.</p>
-            `
-        };
+        // Arka planda hoş geldin e-postası göndermeyi dene (başarısız olsa bile kaydı engellemez)
+        try {
+            const mailOptions = {
+                from: process.env.EMAIL_USER || 'vortex.ch4t@gmail.com',
+                to: email,
+                subject: 'Vortex Chat\'e Hoş Geldin!',
+                html: `
+                    <h2>Vortex'e Hoş Geldin, ${username}!</h2>
+                    <p>Hesabın başarıyla oluşturuldu. Etiketin: <strong>${uniqueTag}</strong></p>
+                    <p>Artık uygulamaya girip hemen arkadaşlarınla sohbet edebilirsin!</p>
+                `
+            };
+            transporter.sendMail(mailOptions).catch(err => console.error("E-posta gönderim uyarısı:", err));
+        } catch (e) {
+            console.error("E-posta gönderilemedi:", e);
+        }
 
-        await transporter.sendMail(mailOptions);
-
-        res.status(201).json({ message: 'Kayıt başarılı! Lütfen e-posta adresinize giderek hesabınızı doğrulayın.' });
+        res.status(201).json({ message: 'Kayıt başarılı! Şimdi giriş yapabilirsiniz.' });
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: 'Sunucu hatası.' });
@@ -85,12 +85,6 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         const isMatch = await bcrypt.compare(password, user.password_hash);
         if (!isMatch) {
             res.status(401).json({ message: 'Geçersiz şifre.' });
-            return;
-        }
-
-        // MySQL'den gelen Buffer veya 0/1 değerini kesin olarak kontrol ediyoruz
-        if (user.is_verified === 0 || user.is_verified === false) {
-            res.status(403).json({ message: 'Lütfen önce e-posta adresinize gönderilen linkten hesabınızı doğrulayın.' });
             return;
         }
 
